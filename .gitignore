@@ -1,0 +1,8 @@
+.env
+/render-status
+/lint-content
+/status.txt
+/status-input.json
+/status-history.jsonl
+/.pellicle-tool-count.json
+/.claude/settings.local.json

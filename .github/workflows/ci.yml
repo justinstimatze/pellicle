@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt drift in:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # staticcheck, pinned: @latest would let an upstream release turn an
+      # unrelated PR red. v0.7.0 needs Go 1.25 to build, and setup-go reads
+      # go.mod with GOTOOLCHAIN=local, so go.mod has to be at 1.25 or above
+      # for this to install at all — no toolchain switch is available here.
+      - name: install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+
+      - name: staticcheck
+        run: staticcheck ./...
+
+      - name: go test (race)
+        run: go test -race ./...
+
+      - name: go build
+        run: |
+          go build -o /tmp/render-status ./cmd/render-status
+
+      # ubuntu-latest ships shellcheck preinstalled -- no separate install
+      # step needed.
+      - name: shellcheck
+        run: shellcheck ./*.sh
+
+      # Regression test for a real bug a pressure-test panel found and
+      # reproduced: `make install` alone used to leave the five status-*.sh
+      # hooks (registered straight from this checkout, per README) pointed
+      # at a repo-local render-status binary that `install` never built,
+      # so every hook failed silently behind its own `2>/dev/null || true`.
+      # This runs the actual install target in a clean checkout and then
+      # actually fires a hook, the same way Claude Code would, instead of
+      # only checking that the Makefile parses.
+      - name: install smoke test
+        run: |
+          make install
+          test -x ./render-status
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          git init -q .
+          echo '{"context":["ci smoke test"],"contributions":[],"consequences":[]}' > status-input.json
+          out="$(echo '{}' | "$GITHUB_WORKSPACE/status-fallback.sh")"
+          test -f status.txt
+          # status-fallback.sh's own header comment calls this load-bearing:
+          # exactly one JSON object on stdout, or the Stop hook's own JSON
+          # parsing breaks. Checks line count directly (jq alone would
+          # happily process multiple concatenated JSON values without
+          # erroring, which wouldn't catch a stray second line).
+          test "$(printf '%s\n' "$out" | wc -l)" -eq 1
+          printf '%s\n' "$out" | jq -e '.systemMessage | length > 0' >/dev/null
+          printf '%s\n' "$out" | jq -e '.systemMessage | contains("ci smoke test")' >/dev/null
